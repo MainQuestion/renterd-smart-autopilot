@@ -1,4 +1,5 @@
 # renterd Smart Autopilot
+English | [Українська](README.uk.md) | [Русский](README.ru.md)
 
 Experimental Smart Autopilot build for [Sia renterd](https://github.com/SiaFoundation/renterd).
 
