@@ -1,825 +1,219 @@
 # renterd Smart Autopilot
 
-[English](README.md) | Українська | [Русский](README.ru.md)
+Неофіційне експериментальне розширення Sia `renterd`, орієнтоване на прозору оцінку хостів, керування портфелем контрактів і розумніше розміщення нових даних.
 
-> **Неофіційна експериментальна збірка**
->
-> Цей проєкт є експериментальною модифікацією
-> [SiaFoundation/renterd](https://github.com/SiaFoundation/renterd).
->
-> Це не офіційний реліз Sia Foundation, і наразі його слід вважати
-> alpha-версією.
+> **Поточний реліз:** `v0.3.0-rc.1` — перший протестований Release Candidate з активним Smart Portfolio decision/execution layer.
 
-## Огляд
+## Що змінилося
 
-**renterd Smart Autopilot** — це експериментальне розширення Sia renterd,
-спрямоване на покращення оцінювання хостів, керування контрактами та,
-у перспективі, рішень щодо розміщення даних.
+Оригінальні механізми renterd залишаються низькорівневим виконавчим шаром: формування контрактів, renew/refresh, upload/download, міграція та архівація.
 
-Довгострокова мета — відійти від залежності від одного непрозорого
-рейтингу хоста та перейти до прозорого багатовимірного профілю.
-
-Цільова модель:
+Smart Autopilot додає над ними policy layer:
 
 ```text
-Host =
-    Reliability
-  + Performance
-  + Resources
-  + Economics
-  + Risk
-  + Technical Compatibility
-  + Network Diversity
+вимірювання та історія хостів
+        ↓
+багатовимірний профіль хоста
+        ↓
+Smart Overall + policy gates
+        ↓
+PortfolioPlan
+        ↓
+ADD / PAUSE / RECOVER / REPLACE
+        ↓
+існуючі механізми renterd
 ```
 
-Ці виміри навмисно залишаються окремими.
+Мета — не замінити renterd одним новим «магічним score», а зберегти окремі властивості хоста видимими та застосовувати відповідні критерії для різних рішень.
 
-Наприклад, хост може бути дуже надійним і дешевим, але повільнішим за
-решту пулу. Інший хост може бути швидким, але створювати надмірний ризик
-концентрації інфраструктури.
+## Реалізований профіль хоста
 
-Smart Autopilot має зберігати ці відмінності, а не приховувати їх усередині
-одного агрегованого числа.
+У RC1 повністю завершено чотири з семи запланованих груп:
 
----
+- **G2 Performance** — реальна швидкість upload/download з історії.
+- **G3 Resources** — експозиція renter до хоста: наші дані, вільне місце, чужі дані, фінансова експозиція, вартість recovery/migration, залишок строку контракту та частка втрачених секторів.
+- **G4 Economics** — вартість storage/ingress/egress плюс якість collateral. Підсумкова Economics оцінка використовує гірше значення між Cost Score і Collateral Score.
+- **G5 Risk Coverage** — історична стабільність цін storage/ingress/egress та collateral.
 
-## Поточний реліз
+Ще заплановані як повні окремі scoring-групи:
 
-### v0.2.0-alpha.1
+- **G1 Reliability**
+- **G6 Technical Compatibility**
+- **G7 Network Diversity**
 
-Цей реліз базується на:
+Частина compatibility/diversity перевірок уже працює як eligibility/policy constraints, але це ще не завершені окремі групи 1–10.
+
+## Smart Overall
+
+Чотири завершені групи можуть об'єднуватися з вагами користувача:
 
 ```text
-renterd: v2.9.4-17-g240bd51e
-Commit:  240bd51e
-Network: mainnet
+SmartOverall =
+    G2 × W2 / 100 +
+    G3 × W3 / 100 +
+    G4 × W4 / 100 +
+    G5 × W5 / 100
 ```
 
-Windows-збірка:
+Persisted defaults: `25 / 25 / 25 / 25`.
 
-```text
-renterd-smart-autopilot-v0.2.0-alpha.1-windows-amd64.zip
-```
+Smart Overall навмисно не є єдиним критерієм для всіх рішень.
 
-SHA256:
+## Три режими
 
-```text
-B7C451CB4C52447FE2CCC1FAD37E48648C1CE259363D7E380C68E7CE11C7CE30
-```
+### Original
 
-Виконуваний файл усередині архіву:
+Використовує звичайну policy формування та обслуговування контрактів renterd. Smart Portfolio decisions і Smart upload ordering не застосовуються.
 
-```text
-renterd.exe
-Size:   61,056,199 bytes
-SHA256: C91A6F16E1641E63AC6513350B0B64563E6DFFAFEBAD3233E6737EB544DE3C84
-```
+Вже розпочаті persistent Smart safety lifecycles безпечно завершуються.
 
-Сторінка релізу:
+### Smart Shadow
 
-https://github.com/MainQuestion/renterd-smart-autopilot/releases/tag/v0.2.0-alpha.1
+Обчислює ті самі Smart-рішення, що й Active, і записує їх у `smart-autopilot.log`, але не виконує нові Smart portfolio mutations.
 
-Пряме посилання на Windows-архів:
+Для нових upload Shadow залишає оригінальний порядок `Uploader.Estimate()` і лише порівнює його зі Smart order у логах.
 
-https://github.com/MainQuestion/renterd-smart-autopilot/releases/download/v0.2.0-alpha.1/renterd-smart-autopilot-v0.2.0-alpha.1-windows-amd64.zip
+### Smart Active
 
----
+Виконує Smart Portfolio decisions і використовує Smart Placement для нових користувацьких upload.
 
-# Реалізовані можливості
+Кандидати сортуються за `SmartOverall DESC` у межах існуючого Good/Usable upload pool.
 
-## Налаштовуваний рейтинг хостів renterd
+## Smart Portfolio
 
-Декілька параметрів існуючого механізму оцінювання хостів renterd, які
-раніше фактично були фіксованими, тепер можна налаштовувати.
+RC1 уміє:
 
-Поточні параметри:
+- заповнювати відсутні слоти через **Smart ADD**;
+- визначати найслабший поточний Good incumbent через Smart Overall;
+- вимагати налаштовуваний **G4 Economics improvement threshold**;
+- порівнювати **KeepCost** і **MigrationCost** перед міграцією;
+- ставити контракт у відновлюваний **Economic Pause**, якщо заміна економічно невигідна;
+- виконувати безпечний **REPLACE**, спочатку створюючи новий контракт;
+- виводити старий контракт через persistent **Smart Drain**;
+- перевіряти безпеку даних перед архівацією.
 
-- вага вільного місця;
-- експонента штрафу за нестачу місця;
-- коефіцієнт резерву при алокації;
-- експонента штрафу за взаємодії;
-- початковий рівень довіри до взаємодій;
-- можливість вимкнути окремі фактори legacy-scoring.
+Default Smart Replacement Threshold: `15%`.
 
-Значення за замовчуванням мають зберігати початкову поведінку renterd.
+Звичайний optimization REPLACE має 4-годинний cadence. ADD ним не блокується.
 
-Ці параметри доступні на окремій сторінці **Scoring** у веб-інтерфейсі renterd.
+## Gouging lifecycle
 
-Існуючий рейтинг renterd не видаляється. Smart Autopilot розробляється
-паралельно з ним, щоб поточна поведінка залишалася зрозумілою й
-налаштовуваною, поки нова профільна модель розвивається.
-
----
-
-## Performance
-
-Окремий **Performance Score** оцінює реальну швидкодію хоста.
-
-Він навмисно зберігається окремо від початкового агрегованого рейтингу renterd.
-
-Поточна реалізація використовує історичні вимірювання upload і download
-та порівнює кожен хост із поточним пулом.
-
-Модель включає:
-
-- історичну швидкість upload;
-- історичну швидкість download;
-- окрему оцінку upload і download;
-- нормалізацію відносно пулу;
-- P95 як референс продуктивності пулу;
-- логарифмічне стискання шкали;
-- обсяг доступних вимірювань;
-- комбінований Performance Score.
-
-Історія продуктивності оцінюється за ковзним часовим вікном, а не лише за
-останнім передаванням.
-
-У таблиці Hosts відображаються:
-
-```text
-Performance
-Upload
-Download
-```
-
-`Performance` — нормалізований рейтинг.
-
-`Upload` і `Download` показують реальну виміряну пропускну здатність у Mbps,
-щоб рейтинг можна було порівнювати з вихідними даними.
-
-Performance залишається незалежним виміром і не множиться на legacy-рейтинг
-хоста renterd.
-
----
-
-## Economics
-
-Окремий **Economics Score** оцінює очікувану вартість використання кожного
-хоста для реального профілю зберігання й трафіку користувача.
-
-У розрахунку враховуються:
-
-- ціна зберігання;
-- ціна upload / ingress;
-- ціна download / egress;
-- очікуваний обсяг зберігання;
-- очікуваний місячний upload;
-- очікуваний місячний download.
-
-Профіль використання береться з уже існуючої конфігурації контрактів renterd:
-
-```text
-Contracts.Storage
-Contracts.Upload
-Contracts.Download
-Contracts.Period
-```
-
-Таким чином зберігається єдине джерело правди для очікуваного обсягу даних
-і трафіку без дублювання Economics-specific налаштувань.
-
-Значення upload і download, які в renterd зберігаються за весь період
-контракту, перед використанням у Economics-моделі перераховуються в
-місячний еквівалент.
-
-Для кожного хоста спочатку оцінюється загальна очікувана вартість:
-
-```text
-TotalCost =
-    StoragePrice × StorageVolume
-  + IngressPrice × MonthlyUpload
-  + EgressPrice × MonthlyDownload
-```
-
-Потім результат нормалізується відносно поточного пулу хостів.
-
-Для дешевого краю пулу використовується percentile-reference замість
-одного raw minimum, щоб один аномально дешевий хост не спотворював всю шкалу.
-
-Підсумковий рейтинг приблизно означає:
-
-```text
-1 = дорого відносно пулу
-10 = серед найдешевших хостів пулу
-```
-
-У таблиці Hosts також показуються вихідні:
-
-```text
-Storage price
-Ingress price
-Egress price
-```
-
-Це робить Economics Score прозорим і перевірюваним.
-
----
-
-## Resources
-
-Окремий **Resources Score** оцінює поточну експозицію рентера щодо хоста
-та можливі наслідки його втрати.
-
-Ця група не обмежується лише вимірюванням вільного дискового простору.
-
-Поточна модель використовує сім сигналів.
-
-### Дані та місткість
-
-```text
-Дані рентера на хості
-Вільне місце
-Місце, зайняте іншими даними
-```
-
-### Фінансова та контрактна експозиція
-
-```text
-Фінансова експозиція на залишок строку контракту
-Орієнтовна вартість відновлення / міграції даних
-Залишок строку контракту
-```
-
-### Історія втрат секторів
-
-```text
-Частка втрачених секторів
-```
-
-Сім параметрів нормалізуються відносно поточного пулу.
-
-Потім вони об'єднуються у три концептуальні блоки, а не через плоске
-рівномірне зважування 1/7:
-
-```text
-Block A = data / capacity
-Block B = money / time
-Block C = sector-loss share
-
-Resources Score =
-    (Block A + Block B + Block C) / 3
-```
-
-Така структура навмисно дає історії втрат секторів достатній вплив, щоб
-серйозна частка втрат не губилася серед інших хороших показників.
-
-Resources відповідає на питання:
-
-> Наскільки дорогим і проблемним буде зникнення саме цього хоста прямо зараз?
-
-Ця оцінка існує поруч із legacy-фактором вільного місця renterd і не замінює його.
-
-У таблиці Hosts можуть відображатися такі вихідні значення:
-
-```text
-Own data
-Free space
-Foreign data
-Exposure
-Recovery compensation estimate
-Contract time remaining
-Lost-sector share
-```
-
----
-
-## Risk Coverage
-
-Окремий **Risk Coverage Score** оцінює історичні зміни цін і collateral
-хоста.
-
-Поточна реалізація відстежує події, пов'язані з:
-
-```text
-Storage price
-Ingress price
-Egress price
-Collateral
-```
-
-Кількість зафіксованих подій оцінюється за налаштовуваним історичним вікном.
-
-Тривалість цього вікна задається на сторінці **Scoring** через параметр
-Risk Price Window.
-
-Поточне значення за замовчуванням:
-
-```text
-14 days
-```
-
-У таблиці Hosts відображається як сам Risk Coverage Score, так і сирі
-лічильники подій, щоб причина оцінки залишалася прозорою.
-
-Ця група навмисно відокремлена від Economics.
-
-Economics відповідає на питання:
-
-> Наскільки дорогий хост зараз?
-
-Risk Coverage покликаний відповідати на питання:
-
-> Наскільки стабільною була економічна поведінка хоста з часом?
-
----
-
-## Історія хостів
-
-Smart Autopilot зберігає історичні спостереження про хости, які можуть
-використовувати нові механізми оцінювання.
-
-Поточні таблиці історії:
-
-```text
-speed_history
-price_history
-scan_history
-```
-
-Це створює основу для рішень, що враховують поведінку хоста з часом,
-а не лише останній scan або останній snapshot налаштувань.
-
----
-
-## Paused contracts
-
-Smart Autopilot додає стан контракту **Paused** між здоровим контрактом
-і контрактом, який потрібно одразу вважати поганим.
-
-Мета — не перетворювати кожну тимчасову проблему хоста на негайний
-жорсткий failure.
-
-Модель станів контракту може розрізняти:
+Smart Active додає безпечніший lifecycle для вже існуючого контракту, якщо єдина проблема хоста — Gouging:
 
 ```text
 Good
-Paused
-Bad
+→ Gouging Paused
+→ recover / replace / timeout drain
 ```
 
-Тимчасово проблемний контракт може залишатися в стані Paused, поки система
-очікує відновлення.
+Gouging-Paused контракт:
 
-Якщо налаштований timeout або умови відмови перевищені, контракт може
-перейти в `Bad`.
+- не отримує нових upload;
+- може залишатися readable, якщо download price допустима;
+- має persistent Smart state;
+- може бути замінений одразу після появи eligible replacement;
+- може запускати safety repair, якщо доступних shards стає `K` або менше.
 
-Інтерфейс Active Contracts показує цей стан окремо від початкової
-good/bad логіки.
+Параметр **Keep Gouging Contract Until Replacement** визначає, чи може такий контракт продовжувати чекати/renew replacement, або має бути drained після safety boundary.
 
----
+## Paused
 
-## Групи в таблиці Hosts
+Проєкт також додає повноцінний стан `Paused` між Good і Bad:
 
-Таблиця Hosts розширена окремими групами Smart Autopilot.
+- нові upload не приймаються;
+- старі дані можуть залишатися readable;
+- Paused placements враховуються як healthy redundancy;
+- recovery повертає контракт у Good;
+- hard threshold/timeout переводить його у Bad.
 
-Наразі реалізовані:
+## Історія та діагностика
+
+Використовуються історичні дані:
+
+- швидкість upload/download;
+- ціни та collateral;
+- результати scan.
+
+Окремий:
 
 ```text
-Performance
-Economics
-Resources
-Risk Coverage
+smart-autopilot.log
 ```
 
-Основний score кожної групи залишається видимим, а додаткові raw-метрики
-можна розгорнути за потреби.
+фіксує ADD, REPLACE, economic pause/recovery, Gouging lifecycle, safety repair і порівняння Original/Smart upload order.
 
-Це важлива частина дизайну Smart Autopilot: користувач має бачити,
-*чому* хост отримав певну оцінку.
+## UI
 
----
+Додано:
 
-## Налаштування відображення таблиць
+- окрему сторінку **Scoring**;
+- налаштування legacy host-score;
+- ваги Smart groups;
+- Smart Replacement Threshold;
+- Keep Gouging Contract Until Replacement;
+- групи профілю у Hosts;
+- raw upload/download Mbps;
+- Smart Overall;
+- покращене сортування хостів;
+- налаштування відображення таблиць/чисел.
 
-У **App preferences** доступні додаткові налаштування відображення таблиць.
+## Перевірка RC1
 
-Поточні параметри:
+Перед публікацією RC1 пройшов build/vet/test, targeted та e2e перевірки Smart-шляхів, а також практичне тестування на робочій установці:
 
 ```text
-Row size
-Number size
-Number weight
-Number font
+4-hour optimization REPLACE cadence
+ADD до завершення cadence при втраті контракту
+Good → Paused → Good
+Paused → Bad → ADD
 ```
 
-Для чисел можна використовувати як звичайний sans-serif, так і
-моноширинний шрифт.
+Бінарний файл релізу побайтно збігається з установленим бінарником, на якому виконувалося фінальне тестування.
 
-За замовчуванням Smart Autopilot використовує відносно щільне
-представлення, щоб великі таблиці хостів і контрактів було легше аналізувати.
-
-Наразі ці налаштування застосовуються до таблиць renterd:
+## Build information
 
 ```text
-Hosts
-Active Contracts
+Release:        v0.3.0-rc.1
+renterd:        v2.9.4-28-g8b23ee01
+Backend commit: 8b23ee01
+Web commit:     8b42f0b5
+Network:        mainnet
 ```
-
-Інфраструктура налаштувань є спільною для веб-застосунків, хоча на цьому
-етапі поведінка застосовується саме до зазначених таблиць renterd.
-
----
-
-## Покращення веб-інтерфейсу
-
-Smart Autopilot також додає низку UI-покращень:
-
-- окрему сторінку Scoring;
-- розгортальні групи профілю хоста;
-- raw-метрики поруч із нормалізованими scores;
-- щільніші таблиці Hosts і Active Contracts;
-- налаштовувану типографіку чисел;
-- опцію моноширинного відображення чисел;
-- покращене відображення станів контрактів;
-- збереження налаштувань таблиці й груп.
-
-Також була виправлена логіка SPA layout у renterd, щоб усунути помилки
-порядку React hooks, які могли виникати при переходах між сторінками без
-повного перезавантаження браузера.
-
----
-
-# Архітектура Smart Autopilot
-
-Цільова архітектура оцінює хости за сімома незалежними вимірами замість
-повної залежності від одного агрегованого score.
-
-У поточній alpha-лінійці вже реалізовано чотири групи:
-
-```text
-Performance
-Resources
-Economics
-Risk Coverage
-```
-
-Ще три основні групи перебувають у розробці:
-
-```text
-Reliability
-Technical Compatibility
-Network Diversity
-```
-
-Точні межі цих груп можуть ще змінюватися в міру подальшого вивчення
-реальних code paths renterd і доступних даних.
-
----
-
-## 1. Reliability
-
-Має описувати, наскільки стабільно хост залишається доступним і виконує
-свої зобов'язання.
-
-Можливі сигнали:
-
-```text
-Uptime
-Interaction history
-Consecutive failures
-Host age / historical presence
-Scan history
-```
-
-Мета — відокремити довгострокову операційну надійність від сирої
-продуктивності.
-
----
-
-## 2. Performance
-
-Реалізовано.
-
-Оцінює, наскільки швидко хост реально обслуговує renter workload.
-
-Поточні дані:
-
-```text
-Upload speed
-Download speed
-```
-
-із нормалізацією відносно пулу та окремим видимим Performance Score.
-
-У майбутньому група може бути розширена додатковими latency та
-operation-time метриками, якщо renterd надійно надаватиме такі дані.
-
----
-
-## 3. Resources
-
-Реалізовано.
-
-Оцінює поточну експозицію рентера, місткість, складність міграції,
-залишок контракту та історію втрат секторів.
-
-Це навмисно ширше, ніж просто advertised free space.
-
----
-
-## 4. Economics
-
-Реалізовано.
-
-Оцінює очікувану вартість хоста на основі реального налаштованого профілю
-storage, upload і download користувача та порівнює її з поточним пулом.
-
----
-
-## 5. Risk
-
-Частково реалізовано через поточний **Risk Coverage**.
-
-Наразі механізм оцінює історичні зміни цін і collateral.
-
-У майбутньому цей вимір може містити додаткові risk-механізми після їх
-проєктування й перевірки на реальних даних і поведінці контрактів renterd.
-
----
-
-## 6. Technical Compatibility
-
-Заплановано.
-
-Ця група має визначати, чи є хост технічно придатним для renter ще до
-початку ранжування.
-
-Можливі умови:
-
-```text
-Contract acceptance
-Host announcement state
-Successful scan completion
-Required protocol support
-Required host functionality
-Other renterd usability gates
-```
-
-Частина цих перевірок уже існує в renterd.
-
-Smart Autopilot спочатку має визначити й зберегти їх поточну семантику,
-а вже потім вирішувати, як саме вони повинні брати участь у новому профілі.
-
----
-
-## 7. Network Diversity
-
-Заплановано.
-
-Ця група має оцінювати спільний інфраструктурний ризик між хостами,
-а не розглядати кожен хост повністю ізольовано.
-
-Можливі сигнали:
-
-```text
-IP address
-Subnet
-ASN
-Geographic information, where reliably available
-Infrastructure overlap with already selected hosts
-```
-
-Мета — зменшити ризик корельованих відмов при розміщенні надлишкових даних.
-
----
-
-# Принципи дизайну
-
-## Спочатку досліджувати поточну поведінку renterd
-
-Зміни мають базуватися на фактичній реалізації renterd, а не на припущеннях
-про те, як система, ймовірно, працює.
-
-Існуючий механізм спочатку досліджується, і лише потім змінюється.
-
----
-
-## Зберігати поточну поведінку, де це можливо
-
-Smart Autopilot розробляється поступово.
-
-Мета — не замінити непомітно існуючу логіку renterd без розуміння того,
-чому вона існує.
-
-Тому нові виміри профілю спочатку вводяться поруч із наявними механізмами.
-
----
-
-## Зберігати оцінювання прозорим
-
-Один score може приховувати важливі компроміси.
-
-Наприклад:
-
-```text
-Host A
-Reliability:  9/10
-Performance:  4/10
-Economics:    8/10
-Risk:         9/10
-Resources:   10/10
-```
-
-Це часто корисніше, ніж зводити всі характеристики до одного числа.
-
-Де це практично, показуються raw-вимірювання, щоб нормалізовані scores
-можна було перевіряти за вихідними даними.
-
----
-
-## Зберігати можливість налаштування користувачем
-
-renterd уже дає користувачу значний контроль над поведінкою renter.
-
-Smart Autopilot має розширювати цей підхід, а не замінювати його новим
-набором прихованих констант.
-
-Параметри, які суттєво впливають на політику або scoring, мають бути
-налаштовуваними там, де це практично й безпечно.
-
----
-
-## Відокремлювати вимірювання від прийняття рішень
-
-Оцінити хост і вирішити, що з ним робити, — це різні задачі.
-
-Поточна робота переважно будує більш багатий профіль хоста.
-
-Майбутня decision logic зможе використовувати його для:
-
-```text
-Host selection
-Contract formation
-Contract renewal
-Contract replacement
-Data placement
-Migration decisions
-Network-diversity management
-```
-
-без необхідності зводити всі вимірювання в один глобальний score.
-
----
-
-# Встановлення
-
-## Windows amd64
-
-Завантажте:
-
-```text
-renterd-smart-autopilot-v0.2.0-alpha.1-windows-amd64.zip
-```
-
-зі сторінки GitHub Releases:
-
-https://github.com/MainQuestion/renterd-smart-autopilot/releases/tag/v0.2.0-alpha.1
-
-Архів містить:
 
 ```text
 renterd.exe
-LICENSE
+Size: 61,659,108 bytes
+SHA256: CE7A9343A1F58C52B44383EFF16C51B4A2D9D3D7DF35E5789ED32577EB988EB2
 ```
-
-Це експериментальна alpha-збірка.
-
-Перед заміною наявної інсталяції рекомендується зробити резервну копію
-конфігурації та даних renterd.
-
----
-
-## Перевірка архіву
-
-Очікуваний SHA256:
 
 ```text
-B7C451CB4C52447FE2CCC1FAD37E48648C1CE259363D7E380C68E7CE11C7CE30
+renterd-smart-autopilot-v0.3.0-rc.1-windows-amd64.zip
+Size: 22,298,517 bytes
+SHA256: E9A016C202E53EEAD39935D9A77B6CFF0A9CB0449A2F1FF2E7349E5A744D5FDD
 ```
 
-PowerShell:
+## Встановлення
 
-```powershell
-Get-FileHash .\renterd-smart-autopilot-v0.2.0-alpha.1-windows-amd64.zip -Algorithm SHA256
-```
+1. Зробіть резервну копію даних/конфігурації renterd.
+2. Завантажте `renterd-smart-autopilot-v0.3.0-rc.1-windows-amd64.zip` з GitHub Release.
+3. Розпакуйте `renterd.exe` і `LICENSE`.
+4. Зупиніть renterd і замініть executable.
+5. Для першої перевірки використовуйте **Original** або **Smart Shadow**, а вже потім **Smart Active**.
 
-Очікуваний результат:
+Міграції бази виконуються стандартним механізмом renterd.
 
-```text
-B7C451CB4C52447FE2CCC1FAD37E48648C1CE259363D7E380C68E7CE11C7CE30
-```
+## Детальне порівняння
 
----
+Див. [`ORIGINAL_VS_SMART_AUTOPILOT.md`](ORIGINAL_VS_SMART_AUTOPILOT.md).
 
-## Перевірка виконуваного файла
+## Реліз
 
-Очікуваний SHA256:
+https://github.com/MainQuestion/renterd-smart-autopilot/releases/tag/v0.3.0-rc.1
 
-```text
-C91A6F16E1641E63AC6513350B0B64563E6DFFAFEBAD3233E6737EB544DE3C84
-```
+## Ліцензія та upstream
 
-PowerShell:
+Це неофіційна експериментальна похідна збірка на основі Sia Foundation renterd.
 
-```powershell
-Get-FileHash .\renterd.exe -Algorithm SHA256
-```
+Див. `LICENSE`.
 
-Перевірка версії:
-
-```powershell
-.\renterd.exe version
-```
-
-Очікувана ідентифікація збірки:
-
-```text
-renterd v2.9.4-17-g240bd51e
-Network mainnet
-Commit: 240bd51e
-```
-
----
-
-# Автоматично згенеровані GitHub source archives
-
-GitHub автоматично додає до кожного Release:
-
-```text
-Source code (zip)
-Source code (tar.gz)
-```
-
-Ці архіви містять вміст цього публічного distribution-репозиторію.
-
-Вони генеруються GitHub автоматично й **не є** Windows-пакетом Smart Autopilot.
-
-Для готового Windows executable використовуйте:
-
-```text
-renterd-smart-autopilot-v0.2.0-alpha.1-windows-amd64.zip
-```
-
----
-
-# Статус розробки
-
-Проєкт наразі є експериментальним alpha-програмним забезпеченням.
-
-Реалізація розвивається поступово паралельно з дослідженням фактичних
-механізмів renterd.
-
-Поточний акцент:
-
-```text
-Host measurement
-Transparent scoring
-Historical observations
-Contract state handling
-User-visible diagnostics
-Configurable behavior
-```
-
-Надалі поверх цих вимірювань планується побудувати інтелектуальний
-decision layer.
-
-У перспективі він може керувати:
-
-```text
-Host portfolio composition
-Contract lifecycle decisions
-Host replacement
-Data migration
-Data placement
-Infrastructure diversity
-```
-
-Мета — не просто створити ще одну формулу `hostScore()`.
-
-Мета — побудувати прозорий рівень керування хостами, який може окремо
-враховувати різні типи якості й ризику.
-
----
-
-# Upstream-проєкт
-
-Smart Autopilot базується на:
-
-https://github.com/SiaFoundation/renterd
-
-renterd розробляється Sia Foundation та її contributors.
-
-Цей репозиторій є незалежним експериментальним проєктом і не є
-афілійованим із Sia Foundation та не підтримується нею офіційно.
-
----
-
-# Ліцензія
-
-Цей проєкт поширюється за ліцензією MIT, відповідно до upstream renterd.
-
-Повний текст:
-
-```text
-LICENSE
-```
+Це не офіційний реліз Sia Foundation. RC-версії призначені для тестування; зберігайте резервні копії та контролюйте логи/alerts.
