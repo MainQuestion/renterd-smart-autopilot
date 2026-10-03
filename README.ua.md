@@ -1,5 +1,7 @@
 # renterd Smart Autopilot
 
+**Мови:** [English](README.md) · Українська · [Русский](README_RU.md)
+
 Неофіційне експериментальне розширення Sia `renterd`, орієнтоване на прозору оцінку хостів, керування портфелем контрактів і розумніше розміщення нових даних.
 
 > **Поточний реліз:** `v0.3.0-rc.1` — перший протестований Release Candidate з активним Smart Portfolio decision/execution layer.
