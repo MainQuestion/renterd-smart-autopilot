@@ -6,9 +6,11 @@
 предназначенное для прозрачной оценки хостов, управления портфелем
 контрактов и более разумного размещения новых данных.
 
-> **Текущий релиз:** `v0.3.1-rc.1` --- обновлённый Release Candidate с
-> опциональной политикой сохранения существующих данных на overpriced
-> (Gouging) контрактах.
+> **Текущий релиз:** `v0.3.3-rc.1` --- Release Candidate с учётом
+> расходов по контрактам (Σ storage, Σ ingress, Σ egress, Σ spent),
+> переработанной оценкой Economics, паузой неудачных кандидатов,
+> исправлением ошибки Merkle-proof после продления контракта и
+> обновлённой таблицей Active contracts.
 
 ## Что изменилось
 
@@ -36,6 +38,35 @@ ADD / PAUSE / RECOVER / REPLACE
 разные свойства хоста раздельными и использовать подходящие критерии для
 каждого решения.
 
+## Что нового в v0.3.3-rc.1
+
+-   **Учёт расходов по контрактам.** В БД появились раздельные расходы на
+    хранение (storage), приём данных (ingress) и чтение (egress). В
+    таблице Active contracts добавлены колонки **Σ storage, Σ ingress,
+    Σ egress, Σ spent**, а также My Data, Capacity, Initial/Remaining
+    Allowance, Σ collateral и Used Collateral. Суммы считаются по цепочке
+    продлений. Σ egress --- нижняя граница: отменённые и неудачные
+    чтения renterd не видит.
+-   **Economics переработан.** Collateral корректирует эффективную цену
+    хранения, Economics Score --- это Cost Score скорректированной
+    стоимости. Якоря стоимости и collateral берутся только по пригодным
+    хостам; хосты с нулевой стоимостью не искажают якорь.
+-   **Пауза кандидата Smart.** Кандидат, у которого формирование
+    контракта провалилось по вине хоста, исключается из плана на 24
+    часа (при повторных неудачах до 7 суток).
+-   **Исправление Merkle-proof.** Исправлена ошибка (дефект upstream),
+    из-за которой после продления контракта его рассылка ревизий
+    отвергалась (`file contract revision parent has invalid Merkle
+    proof`). Уже испорченные элементы чинятся один раз при запуске.
+-   **Быстрее история цен.** Новый индекс `price_history` ускоряет
+    запрос истории цен примерно в 35 раз.
+-   **UI.** Выбор колонок запоминается в Hosts и Active contracts,
+    сгруппированные колонки контрактов, цвета, сортировка, итоги под
+    заголовками, убраны подсказки, повторяющие значение.
+
+Подробнее --- в release notes релиза. Три миграции БД (`00067`, `00068`,
+`00069`) выполняются автоматически и только добавляют колонки и индекс.
+
 ## Реализованный профиль хоста
 
 В RC1 полностью завершены четыре из семи запланированных групп:
@@ -46,9 +77,10 @@ ADD / PAUSE / RECOVER / REPLACE
     свободное место, чужие данные, финансовая экспозиция, стоимость
     recovery/migration, остаток срока контракта и доля потерянных
     секторов.
--   **G4 Economics** --- стоимость storage/ingress/egress плюс качество
-    collateral. Итоговый Economics Score использует худшее значение
-    между Cost Score и Collateral Score.
+-   **G4 Economics** --- стоимость storage/ingress/egress с поправкой на
+    качество collateral: залог корректирует эффективную цену хранения, а
+    итоговый Economics Score --- это Cost Score скорректированной
+    стоимости (якорь p10 по пригодным хостам).
 -   **G5 Risk Coverage** --- историческая стабильность
     storage/ingress/egress цен и collateral.
 
@@ -106,7 +138,7 @@ Good/Usable upload pool.
 
 ## Smart Portfolio
 
-RC1 умеет:
+Smart Portfolio умеет:
 
 -   заполнять недостающие contract slots через **Smart ADD**;
 -   находить самый слабый текущий Good incumbent по Smart Overall;
@@ -116,7 +148,10 @@ RC1 умеет:
     экономически не оправдана;
 -   выполнять безопасный **REPLACE**, сначала создавая новый контракт;
 -   выводить старый контракт через persistent **Smart Drain**;
--   проверять безопасность данных до архивации.
+-   проверять безопасность данных до архивации;
+-   временно исключать кандидата, у которого формирование провалилось по
+    вине хоста (24 часа, при повторных неудачах до 7 суток; хранится в
+    памяти и сбрасывается при перезапуске).
 
 Default Smart Replacement Threshold: `15%`.
 
@@ -149,9 +184,9 @@ drained после safety boundary.
 
 ### Allow Existing Data on Overpriced Contracts
 
-Новая настройка **Allow Existing Data on Overpriced Contracts**
-позволяет Smart Active сохранять уже размещённые данные на
-Gouging-контракте вместо переноса данных только из-за завышенной цены.
+Настройка **Allow Existing Data on Overpriced Contracts** позволяет
+Smart Active сохранять уже размещённые данные на Gouging-контракте
+вместо переноса данных только из-за завышенной цены.
 
 -   Настройка находится на странице **Scoring** и **по умолчанию
     выключена**, поэтому прежнее поведение сохраняется.
@@ -219,12 +254,25 @@ safety repair и сравнение Original/Smart upload order.
 -   raw upload/download Mbps;
 -   Smart Overall;
 -   улучшенная сортировка хостов;
--   настройки отображения таблиц и чисел.
+-   настройки отображения таблиц и чисел;
+-   таблица **Active contracts** с группами колонок (General, Time,
+    Contract data, Financial, Financial original), колонками Σ spent,
+    Σ storage, Σ ingress, Σ egress, My Data, Capacity, Allowance и
+    collateral, сортировкой, итогами под заголовками и сохранением
+    выбора колонок.
 
-## Проверка RC1
+## Проверка
 
-Перед публикацией RC1 прошёл build/vet/test, targeted и e2e проверки
-Smart-путей, а также практическое тестирование на рабочей установке:
+Перед публикацией v0.3.3-rc.1 прошёл build/vet/test (включая e2e и
+`-race` по затронутым пакетам), тест исправления Merkle-proof на
+реальной цепочке, а также практическое тестирование на рабочей
+установке: миграции `00067`--`00069`, разовое исправление 8 контрактов
+(`invalid: 8` → `repaired: 8`, на следующем старте `invalid: 0`),
+успешная рассылка ревизии, проверка таблицы контрактов в браузере.
+Релизная сборка собрана из тех же коммитов, что и работающая на
+рабочей установке.
+
+Ранее, перед публикацией RC1, прошли проверки Smart-путей:
 
 ``` text
 4-hour optimization REPLACE cadence
@@ -233,42 +281,44 @@ Good → Paused → Good
 Paused → Bad → ADD
 ```
 
-Бинарник релиза побайтно совпадает с установленным бинарником, на
-котором проводилось финальное тестирование.
-
 ## Build information
 
 ``` text
-Release:        v0.3.1-rc.1
-renterd:        v0.3.1-rc.1-1-g25318c8c
-Backend commit: 25318c8c
-Web commit:     0d084776
+Release:        v0.3.3-rc.1
+renterd:        v0.3.3-rc.1
+Backend commit: 3738c027
+Web commit:     83a2dde8
 Network:        mainnet
 ```
 
 ``` text
 renterd.exe
-Size: 61,758,577 bytes
-SHA256: 9CC3D68BDECB5B8AC885464F21F841A4832887A1BE58D9404CC4B26188CC30EB2
+Size: 62,078,153 bytes
+SHA256: C9FB10B32D08BBD12150C2C34ED1C38092B472B55BCC2BD7A797E26423B94F17
 ```
 
 ``` text
-renterd-smart-autopilot-v0.3.1-rc.1-windows-amd64.zip
-Size: 22322705 bytes
-SHA256: ACE44262B67D7000FF1F090599AC262135E39011EE469ACB49A1B18D099D61CA
+renterd-smart-autopilot-v0.3.3-rc.1-windows-amd64.zip
+Size: 22011895 bytes
+SHA256: E0AB8B28DD4A2701535D02E4F177D1E29BE4B83EE7DD6397998C58CC049D8B68
 ```
 
 ## Установка
 
-1.  Сделайте резервную копию данных и конфигурации renterd.
-2.  Скачайте `renterd-smart-autopilot-v0.3.1-rc.1-windows-amd64.zip` из
+1.  Сделайте резервную копию данных и конфигурации renterd (для
+    SQLite --- `.backup` БД и `metrics.sqlite`).
+2.  Скачайте `renterd-smart-autopilot-v0.3.3-rc.1-windows-amd64.zip` из
     GitHub Release.
 3.  Распакуйте `renterd.exe` и `LICENSE`.
 4.  Остановите renterd и замените executable.
 5.  Для первого запуска используйте **Original** или **Smart Shadow**, а
     затем при необходимости переходите в **Smart Active**.
 
-Миграции базы выполняются стандартным механизмом renterd.
+Миграции базы выполняются стандартным механизмом renterd. При первом
+запуске выполнятся миграции `00067`--`00069` (создание индекса занимает
+секунды), а в логе появятся строки `contract elements checked` и, если
+нужно, `contract elements repaired`. Откат: верните прежний
+`renterd.exe`; старый бинарник стартует на БД с новыми миграциями.
 
 ## Подробное сравнение
 
@@ -276,7 +326,7 @@ SHA256: ACE44262B67D7000FF1F090599AC262135E39011EE469ACB49A1B18D099D61CA
 
 ## Релиз
 
-https://github.com/MainQuestion/renterd-smart-autopilot/releases/tag/v0.3.1-rc.1
+https://github.com/MainQuestion/renterd-smart-autopilot/releases/tag/v0.3.3-rc.1
 
 ## Лицензия и upstream
 
